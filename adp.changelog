@@ -1,0 +1,39 @@
+12/03/15 - integrate and correct steps are now in one module; integration is now repeated by default with optimised geometric parameters as described in the XDS wiki
+
+11/03/15 - summary is now produced at the end of merger module
+
+11/03/15 - modifed prepare xds script
+
+05/03/15 - added XDSCONV step to write out a file containing unmerged intensities in SHELX format
+
+04/03/15 - rewrote the scaling module; data files and log files no longer moved to separate subfolders
+
+22/12/14 - modified installtion procedure so that a small config file needs to be sourced to set all paths correctly
+
+22/12/14 - added the option to process small datasets (<150 frames) and reworked symmetry analysis in correcter.sh
+
+19/12/14 - restructured the correcter to reduce number of runs - needs to be tested fully
+
+19/12/14 - now reports the experiment data, location of original images used and the anistropic deltaB
+
+18/12/14 - named the script package as ADP
+
+18/12/14 - introduced better reporting of why XDS has failed, including the error message from the last XDS job
+
+18/12/14 - modified correcter.sh to catch errors during scaling
+
+17/12/14 - modified data analyser to remove GO processing folders
+
+03/12/14 - created a separate data analysis module (data_analyser_sls.sh) to cope with identical filenames in separate subfolders and create project id based on merged subfolder/image name
+
+02/12/14 - fixed serious bugs in indexer.sh
+
+02/12/14 - Added support for SLS PXII
+
+18/03/13 - Add compulsory re-indexing step after resetting beam centre to image centre position after a poor indexing solution
+
+17/03/13 - Added support for MarCCD
+
+10/03/13 - Friedel's law flag set to "False" by default in XDS
+
+

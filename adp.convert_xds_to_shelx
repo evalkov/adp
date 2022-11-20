@@ -1,0 +1,31 @@
+#! /bin/bash
+
+# checks if previous step resulted in error or it is a grid scan and exits
+
+if [ -e error.log ] || [ -e GRID_SCAN ]; then
+	exit
+fi
+
+while [ 1 ]
+do
+    PID=$(ls | grep "XDS_ASCII.HKL" | awk '{print $1}')
+    [ ! -n "$PID" ] && sleep 1 || break
+done
+
+spacegroupnum=`awk '/SPACE_GROUP_NUMBER=/ { print $2 }' XDS_ASCII.HKL`
+cell=`awk '/UNIT_CELL_CONSTANTS=/ { print $2, $3, $4, $5, $6, $7 }' XDS_ASCII.HKL`
+echo "\
+SPACE_GROUP_NUMBER=$spacegroupnum
+UNIT_CELL_CONSTANTS=$cell
+INPUT_FILE=XDS_ASCII.HKL
+OUTPUT_FILE=shelx.data.hkl SHELX
+FRIEDEL'S_LAW=FALSE
+MERGE=FALSE" >> XDSCONV.INP
+
+xdsconv > /dev/null 2>&1
+
+while [ 1 ]; do
+        PID=$(ls | grep "XDSCONV.LP" | awk '{print $1}')
+        [ ! -n "$PID" ] && sleep 1 || break
+done
+

@@ -1,0 +1,405 @@
+#! /bin/bash
+
+# checks if previous step resulted in error or it is a grid scan and exits
+if [ -e error.log ] || [ -e GRID_SCAN ]; then
+	exit
+fi
+
+cpu_num=`cat /proc/cpuinfo | grep -c processor`
+
+if [ ! "$1" = "" ]; then
+    echo "HEAD" > 1-mtzdump.inp
+    mtzdump hklin $1 < 1-mtzdump.inp > 1-mtzdump.log 2>&1
+    xtal=`awk '/project/ { getline; getline; printf "%s", $2 }' 1-mtzdump.log`
+    cp $1 $xtal.indexed.mtz
+elif [ "$1" = "" ]; then
+    xtal=`ls *indexed.mtz | awk -F ".indexed.mtz" '{ printf "%s", $1 }'`
+    while [ 1 ]
+    do
+        [ ! -e $xtal.indexed.mtz ] && sleep 1 || break
+    done
+    echo "HEAD" > 1-mtzdump.inp
+    mtzdump hklin $xtal.indexed.mtz < 1-mtzdump.inp > 1-mtzdump.log 2>&1
+else
+	echo -e "Failed to merge data. Have a look at the logs. "
+	exit
+
+fi
+
+batches=`awk '/Batch number/ {getline; printf "%s\n", $1}' 1-mtzdump.log | wc -l`
+first_batch=`awk '/Batch number/ {getline; printf "%s\n", $1}' 1-mtzdump.log | head -1`
+last_batch=`awk '/Batch number/ {getline; printf "%s\n", $1}' 1-mtzdump.log | tail -1`
+lores=`awk '/Resolution Range/,/Sort Order/' 1-mtzdump.log | grep -E '[0-9]' | awk '{ print $4 }'`
+hires=`awk '/Resolution Range/,/Sort Order/' 1-mtzdump.log | grep -E '[0-9]' | awk '{ print $6 }'`
+spacegroup=`awk -F '[(|)]' '/ * Space group = / { print $1 }' 1-mtzdump.log | awk -F\' '{print $2}'| sed 's/ //g'`
+spacegroupnum=`awk -F '[(|)]' '/ * Space group = / { print $2 }' 1-mtzdump.log | awk '{ printf "%s", $2}'`
+
+# scales 1-aimless.scales plot 1-aimless.plt rogues 1-aimless.rogues correlplot 1-aimless_correl.xmgr rogueplot 1-aimless_rogue.xmgr normplot 1-aimless_norm.xmgr anomplot 1-aimless_anom.xmgr
+
+echo "\
+name project $xtal crystal $xtal dataset $xtal
+run 1 batch $first_batch to $last_batch
+resolution low $lores high $hires
+onlymerge
+refine parallel $cpu_num
+" > 1-aimless.inp
+
+aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz scales 1-aimless.scales plot 1-aimless.plt rogues 1-aimless.rogues correlplot 1-aimless_correl.xmgr rogueplot 1-aimless_rogue.xmgr normplot 1-aimless_norm.xmgr anomplot 1-aimless_anom.xmgr < 1-aimless.inp > 1-aimless.log 2>&1
+
+while [ 1 ]
+do
+    [ ! -e 1-aimless.log ] && sleep 1 || break
+done
+
+last_aimless_log=`ls -a *aimless.log | tail -1`
+
+negativescales=`awk '/Negative scale/' $last_aimless_log`
+noobservations=`awk '/No observations/' $last_aimless_log`
+
+if [ "$negativescales" ]; then
+	cp 1-aimless.inp 2-aimless.inp
+	echo -e "Scaling failed due to 'negative scales' error! Will try scaling with damping level set to 0.1."
+	echo "filter 1.0e-6, 0.1" >> 2-aimless.inp
+	aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz scales 2-aimless.scales plot 2-aimless.plt rogues 2-aimless.rogues correlplot 2-aimless_correl.xmgr rogueplot 2-aimless_rogue.xmgr normplot 2-aimless_norm.xmgr anomplot 2-aimless_anom.xmgr < 2-aimless.inp > 2-aimless.log 2>&1
+elif
+	[ "$noobservations" ]; then
+	cp 1-aimless.inp 2-aimless.inp
+	echo -e "Scaling failed due to 'no observations' error. Reducing the threshold for inclusion of weak reflections." 
+	echo "exclude sdmin 2" >> 2-aimless.inp
+	aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz scales 2-aimless.scales plot 2-aimless.plt rogues 2-aimless.rogues correlplot 2-aimless_correl.xmgr rogueplot 2-aimless_rogue.xmgr normplot 2-aimless_norm.xmgr anomplot 2-aimless_anom.xmgr < 2-aimless.inp > 2-aimless.log 2>&1
+fi
+
+if [ ! -e $xtal.intensities.mtz ]; then
+	echo -e "Failed to merge data. Have a look at the logs. "
+	exit
+fi
+
+last_aimless_log=`ls -a *aimless.log | tail -1`
+
+checkrescc=`awk '/Estimates of resolution limits: overall/ {getline; printf "%3.2f\n", $9}' $last_aimless_log`
+checkressigi=`awk '/Estimates of resolution limits: overall/ {getline; getline; printf "%3.2f\n", $7}' $last_aimless_log`
+
+echo -e "New high resolution cut-off:	$checkressigi A."
+
+#re-running scaling/merging with new resolution cutoff
+
+if [ -e 1-aimless.inp ]; then
+	inpfile=`cat 1-aimless.inp | wc -l`
+	head -n $inpfile 1-aimless.inp > 2-aimless.inp
+	sed -i '/resolution/d' 2-aimless.inp
+	echo "resolution low $lores high $checkressigi " >> 2-aimless.inp
+	aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz scales 2-aimless.scales plot 2-aimless.plt rogues 2-aimless.rogues correlplot 2-aimless_correl.xmgr rogueplot 2-aimless_rogue.xmgr normplot 2-aimless_norm.xmgr anomplot 2-aimless_anom.xmgr < 2-aimless.inp > 2-aimless.log   2>&1
+	while [ 1 ]
+	do
+    		[ ! -e 2-aimless.log ] && sleep 1 || break
+	done
+elif [ -e 2-aimless.inp ]; then
+	inpfile=`cat 2-aimless.inp | wc -l`
+	head -n $inpfile 2-aimless.inp > 3-aimless.inp
+	sed -i '/resolution/d' 3-aimless.inp
+	echo "resolution low $lores high $checkressigi " >> 3-aimless.inp
+	aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz scales 3-aimless.scales plot 3-aimless.plt rogues 3-aimless.rogues correlplot 3-aimless_correl.xmgr rogueplot 3-aimless_rogue.xmgr normplot 3-aimless_norm.xmgr anomplot 3-aimless_anom.xmgr < 3-aimless.inp > 3-aimless.log   2>&1
+	while [ 1 ]
+	do
+    		[ ! -e 3-aimless.log ] && sleep 1 || break
+	done
+fi
+
+last_aimless_log=`ls -a *aimless.log | tail -1`
+
+negativescales=`awk '/Negative scale/' $last_aimless_log`
+noobservations=`awk '/No observations/' $last_aimless_log`
+
+if [ -e 2-aimless.inp ]; then
+	if [ "$negativescales" ]; then
+		echo -e "Scaling failed due to 'negative scales' error! Will try scaling with damping level set to 0.1."
+		echo "filter 1.0e-6, 0.1" >> 3-aimless.inp
+		aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz 3-aimless.scales plot 3-aimless.plt rogues 3-aimless.rogues correlplot 3-aimless_correl.xmgr rogueplot 3-aimless_rogue.xmgr normplot 3-aimless_norm.xmgr anomplot 3-aimless_anom.xmgr < 3-aimless.inp > 3-aimless.log 2>&1
+		while [ 1 ]; do
+   			[ ! -e 3-aimless.log ] && sleep 1 || break
+		done
+	elif
+		[ "$noobservations" ]; then
+		echo -e "Scaling failed due to 'no observations' error. Reducing the threshold for inclusion of weak reflections." 
+		echo "exclude sdmin 2" >> 3-aimless.inp
+		aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz 3-aimless.scales plot 3-aimless.plt rogues 3-aimless.rogues correlplot 3-aimless_correl.xmgr rogueplot 3-aimless_rogue.xmgr normplot 3-aimless_norm.xmgr anomplot 3-aimless_anom.xmgr < 3-aimless.inp > 3-aimless.log 2>&1
+		while [ 1 ]; do
+   			[ ! -e 3-aimless.log ] && sleep 1 || break
+		done
+	fi
+elif [ -e 3-aimless.inp ]; then
+	if [ "$negativescales" ]; then
+		echo -e "Scaling failed due to 'negative scales' error! Will try scaling with damping level set to 0.1."
+		echo "filter 1.0e-6, 0.1" >> 4-aimless.inp
+		aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz 4-aimless.scales plot 4-aimless.plt rogues 4-aimless.rogues correlplot 4-aimless_correl.xmgr rogueplot 4-aimless_rogue.xmgr normplot 4-aimless_norm.xmgr anomplot 4-aimless_anom.xmgr < 4-aimless.inp > 4-aimless.log 2>&1
+		while [ 1 ]; do
+   			[ ! -e 4-aimless.log ] && sleep 1 || break
+		done
+	elif
+		[ "$noobservations" ]; then
+		echo -e "Scaling failed due to 'no observations' error. Reducing the threshold for inclusion of weak reflections." 
+		echo "exclude sdmin 2" >> 4-aimless.inp
+		aimless hklin $xtal.indexed.mtz hklout $xtal.intensities.mtz 4-aimless.scales plot 4-aimless.plt rogues 4-aimless.rogues correlplot 4-aimless_correl.xmgr rogueplot 4-aimless_rogue.xmgr normplot 4-aimless_norm.xmgr anomplot 4-aimless_anom.xmgr < 4-aimless.inp > 4-aimless.log 2>&1
+		while [ 1 ]; do
+   			[ ! -e 4-aimless.log ] && sleep 1 || break
+		done
+	fi
+fi
+
+last_aimless_log=`ls -a *aimless.log | tail -1`
+
+aniso_deltab=`grep "Anisotropic deltaB" $last_aimless_log | awk 'BEGIN {FS=":"}; {printf "%2.2f\n",$2}'`
+approx_deltab=`grep "Anisotropic deltaB" $last_aimless_log | awk 'BEGIN {FS=":"}; {printf "%2.0f\n",$2}'`
+
+if [ "$approx_deltab" -gt "10" ] && [ "$approx_deltab" -lt "25" ] || [ "$approx_deltab" -eq "25" ]; then
+    echo -e "\nWARNING: Data is mildly anisotropic with anisotropic delta B of $aniso_deltab Angstroms^2."
+elif [ "$approx_deltab" -gt "25" ] && [ "$approx_deltab" -lt "50" ] || [ "$approx_deltab" -eq "50" ]; then
+    echo -e "\nWARNING: Data is strongly anisotropic with anisotropic delta B of $aniso_deltab Angstroms^2."
+    echo -e "Consider ellipsodal truncation and anisotropic scaling of the data."
+elif [ "$approx_deltab" -gt "50" ]; then
+    echo -e -e "\nWARNING: Data is severely anisotropic with anisotropic delta B of $aniso_deltab Angstroms^2."
+    echo -e "Ellipsoidal truncation and anisotropic scaling of the data is strongly advised."
+fi
+
+
+echo "\
+truncate -
+    YES
+end " > 1-truncate.inp
+
+while [ 1 ]
+do
+    [ ! -e $xtal.intensities.mtz ] && sleep 1 || break
+done
+
+truncate hklin $xtal.intensities.mtz hklout $xtal.amplitudes.mtz < 1-truncate.inp > 1-truncate.log 2>&1
+
+uniqueify $xtal.amplitudes.mtz $xtal.$spacegroup.merged.freeR.mtz > /dev/null 2>&1
+
+if [ -e $xtal.$spacegroup.merged.freeR.log ]; then
+	mv $xtal.$spacegroup.merged.freeR.log 1-uniqueify.log 2>&1
+fi
+
+while [ 1 ]; do
+	[ ! -e 1-uniqueify.log ] && sleep 1 || break
+done
+
+if [ ! -e $xtal.amplitudes.mtz ] ||  [ ! -e $xtal.$spacegroup.merged.freeR.mtz ]; then
+	echo -e "Failed to merge data. Have a look at the logs. "
+	exit
+fi
+
+if [ -e shelx.data.hkl ]; then
+	mv shelx.data.hkl $xtal.shelx.hkl
+fi
+
+
+last_aimless_log=`ls -a *aimless.log | tail -1`
+
+scalastats=`awk '/InnerShell/,/anomalous signal/ { print}' $last_aimless_log`
+
+if [ ! "$1" = "" ] && [ ! -e CORRECT.LP ]; then
+    echo -e "\
+
+\n               ### DATA PROCESSING STATISTICS ###
+\n$scalastats\n"
+fi
+
+if [ -e processing_summary.log ]; then
+    rm -rf processing_summary.log
+fi
+
+scalalog=`ls -a *aimless.log | tail -1`
+sumlog=processing_summary.log
+datasetlog=DATASET_PARAMS.LP
+xdslog=CORRECT.LP
+trunclog=1-truncate.log
+uniqlog=1-uniqueify.log
+dumplog=1-mtzdump.log
+integratelog=INTEGRATE.LP
+
+dataset=`awk '/Project/ { print $4}' $datasetlog`
+
+if [ ! -e XYCORR.LP ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.				
+Please examine all the logs carefully.					
+#########################################################################\n"
+	exit
+elif [ ! -e INIT.LP ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.				
+Please examine all the logs carefully.					
+#########################################################################\n"
+	exit
+elif [ ! -e IDXREF.LP ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.				
+Please examine all the logs carefully.					
+#########################################################################\n"
+	exit
+elif [ ! -e DEFPIX.LP ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.				
+Please examine all the logs carefully.					
+#########################################################################\n"
+	exit
+elif [ ! -e INTEGRATE.LP ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.				
+Please examine all the logs carefully.					
+#########################################################################\n"
+	exit
+elif [ ! -e CORRECT.LP ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.
+Please examine all the logs carefully.
+#########################################################################\n"
+	exit
+elif [ ! -e $scalalog ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.
+Please examine all the logs carefully.
+#########################################################################\n"
+	exit
+elif [ ! -e $trunclog ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.
+Please examine all the logs carefully.
+#########################################################################\n"
+	exit
+elif [ ! -e $uniqlog ]; then
+	echo -e "\
+\n\n#########################################################################
+Dataset $dataset could not be processed.
+Please examine all the logs carefully.
+#########################################################################\n"
+	exit
+fi
+
+lores=`awk '/Low resolution limit/ {printf "%s", $4}' $scalalog`
+hires=`awk '/High resolution limit/ {printf "%s", $4}' $scalalog`
+outlores=`awk '/Low resolution limit/ {printf "%s", $6}' $scalalog`
+outhires=`awk '/High resolution limit/ {printf "%s", $6}' $scalalog`
+rmerge=`awk '/Summary/,/Maximum/' $scalalog | awk '/Rmerge  \(all/ {printf "%s", $6}'`
+rmergepercent=`echo "scale=2; $rmerge*100" | bc | awk '{printf "%2.1f%",$1}'`
+rmergeout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Rmerge  \(all/ {printf "%s", $8}'`
+rmergeoutpercent=`echo "scale=2; $rmergeout*100" | bc | awk '{printf "%2.1f%",$1}'`
+rmeas=`awk '/Summary/,/Maximum/' $scalalog | awk '/Rmeas \(all/ {printf "%s", $6}'`
+rmeasout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Rmeas \(all/ {printf "%s", $8}'`
+rmeaspercent=`echo "scale=2; $rmeas*100" | bc | awk '{printf "%2.1f%",$1}'`
+rmeasoutpercent=`echo "scale=2; $rmeasout*100" | bc | awk '{printf "%2.1f%",$1}'`
+rpim=`awk '/Summary/,/Maximum/' $scalalog | awk '/Rpim \(all/ {printf "%s", $6}'`
+rpimout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Rpim \(all/ {printf "%s", $8}'`
+rpimpercent=`echo "scale=2; $rpim*100" | bc | awk '{printf "%2.1f%",$1}'`
+rpimoutpercent=`echo "scale=2; $rpimout*100" | bc | awk '{printf "%2.1f%",$1}'`
+totalobs=`awk '/Summary/,/Maximum/' $scalalog | awk '/Total number of observations/ {printf "%s", $5}'`
+totalobsout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Total number of observations/ {printf "%s", $7}'`
+unique=`awk '/Summary/,/Maximum/' $scalalog | awk '/Total number unique/ {printf "%s", $4}'`
+uniqueout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Total number unique/ {printf "%s", $6}'`
+signal=`awk '/Summary/,/Maximum/' $scalalog | awk '/Mean/ {printf "%s", $2}'`
+signalout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Mean/ {printf "%s", $4}'`
+halfsetcc=`awk '/half-set correlation CC/ {printf "%s", $5}' $scalalog`
+halfsetccout=`awk '/half-set correlation CC/ {printf "%s", $6}' $scalalog`
+completeness=`awk '/Summary/,/Maximum/' $scalalog | awk '/Completeness/ {printf "%s", $2}'`
+completenessout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Completeness/ {printf "%s", $4}'`
+multiplicity=`awk '/Summary/,/Maximum/' $scalalog | awk '/Multiplicity/ {printf "%s", $2}'`
+multiplicityout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Multiplicity/ {printf "%s", $4}'`
+siganototal=`awk '/ STATISTICS OF SAVED DATA SET/,/total/' $xdslog | grep "total" | tail -1 | awk '/[0-9]+$/ {printf "%3.2f\n", $13}'`
+siganoouter=`awk '/ STATISTICS OF SAVED DATA SET/,/total/' $xdslog | grep -B 1 "total" | head -1 | awk '/[0-9]+$/ {printf "%3.2f\n", $13}'`
+anomcorrtotal=`awk '/ STATISTICS OF SAVED DATA SET/,/total/' $xdslog | grep "total" | tail -1 | awk '/[0-9]+$/ {printf "%s\n", $12}'`
+anomcorrouter=`awk '/ STATISTICS OF SAVED DATA SET/,/total/' $xdslog | grep -B 1 "total" | head -1 | awk '/[0-9]+$/ {printf "%s\n", $12}'`
+anompairstotal=`awk '/ STATISTICS OF SAVED DATA SET/,/total/' $xdslog | grep "total" | tail -1 | awk '/[0-9]+$/ {printf "%s\n", $14}'`
+anompairsouter=`awk '/ STATISTICS OF SAVED DATA SET/,/total/' $xdslog | grep -B 1 "total" | head -1 | awk '/[0-9]+$/ {printf "%s\n", $14}'`
+anomcompleteness=`awk '/Summary/,/Maximum/' $scalalog | awk '/Anomalous completeness/ {printf "%s", $3}'`
+anomcompletenessout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Anomalous completeness/ {printf "%s", $5}'`
+anommultiplicity=`awk '/Summary/,/Maximum/' $scalalog | awk '/Anomalous multiplicity/ {printf "%s", $3}'`
+anommultiplicityout=`awk '/Summary/,/Maximum/' $scalalog | awk '/Anomalous multiplicity/ {printf "%s", $5}'`
+wilsonb=`awk '/TABLE: Wilson Plot - Suggested Bfactor/' $trunclog | sed 's/.[^:]*$//' | awk -F "Bfactor" '{ printf "%3.1f", $2 }'`
+mosaicity=`awk '/SUGGESTED/,/REFLECTING_RANGE_E.S.D.=/ {printf "%3.3f\n", $4}' $integratelog | tail -1`
+refinedcell=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f %4.1f %4.1f %4.1f %4.1f %4.1f\n", $2, $3, $4, $5, $6, $7}'`
+aaxis=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f\n", $2}'`
+baxis=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f\n", $3}'`
+caxis=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f\n", $4}'`
+alpha=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f\n", $5}'`
+beta=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f\n", $6}'`
+gamma=`grep "UNIT_CELL_CONSTANTS" $xdslog | tail -1 | awk '/[0-9]+$/ {printf "%4.1f\n", $7}'`
+spacegroup=`awk -F '[(|)]' '/ * Space group = / { print $1 }' $dumplog | awk -F\' '{print $2}'| sed 's/ //g'`
+spacegroupnum=`awk -F '[(|)]' '/ * Space group = / { print $2 }' $dumplog | awk '{ printf "%s", $2}'`
+aniso_deltab=`grep "Anisotropic deltaB" $scalalog | awk 'BEGIN {FS=":"}; {printf "%2.2f\n",$2}'`
+#spacegroupnum=`awk -F '[(|)]' '/ * Space group = / { print $2 }' MTZDUMP.LP | awk '{ printf "%s", $2}'`
+#spacegroup=`awk -v s=$spacegroupnum 's {gsub(/\[|\]/,"");for (i=1; i<=NF; i++) {split($i,a,","); if (a[1]==s) printf "%s", a[2]}}' CORRECT.LP | sed 's/(//g;s/)//g'`
+#check for rhombohedral/hexagonal setting in space groups 146 and 155 and print the PDB standard
+if [ $spacegroupnum == "146" ] && [ $alpha == "$beta" ] && [ $alpha == "$gamma" ]; then
+	spacegroup=R3
+elif [ $spacegroupnum == "155" ] && [ $alpha == "$beta" ] && [ $alpha == "$gamma" ]; then
+	spacegroup=R32
+elif [ $spacegroupnum == "146" ] && [ ! $alpha == "$gamma" ]; then
+	spacegroup=H3
+elif [ $spacegroupnum == "155" ] && [ ! $alpha == "$gamma" ]; then
+	spacegroup=H32
+fi
+anom=`awk '/anomalous flag/&&/OFF/' $scalalog`
+frames=`cat INTEGRATE.LP | awk '/DATA_RANGE= / { printf "%s", $3}'`
+wavelength=`cat INTEGRATE.LP | awk '/WAVELENGTH= / { printf "%1.5f", $2}'`
+oscillation=`cat INTEGRATE.LP | awk '/OSCILLATION_RANGE= / { printf "%1.2f", $2}'`
+#specify data and processing directories
+
+datafile_free=`ls *.merged.freeR.mtz`
+
+echo -e "\
+
+\n### DATA PROCESSING STATISTICS ###\n" | tee -a $sumlog
+
+
+echo -e "Dataset:			$dataset" | tee -a $sumlog
+
+exp_date=`grep "Experiment date" $datasetlog | awk '{print $3, $4, $5}'`
+if [[ $exp_date ]]; then
+    echo -e "\
+Experiment date:                $exp_date" | tee -a $sumlog
+fi
+
+image_dir=`awk '/Image directory:/ {print $3}' $datasetlog`
+
+echo -e "\
+Processing directory:		$PWD
+Image directory:                $image_dir
+Structure factor amplitudes:	$datafile_free				
+Wavelength:			$wavelength							
+Oscillation range (deg):        $oscillation					
+Number of frames:		$frames					
+Unit cell parameters:		$refinedcell		
+Space group:			$spacegroup (# $spacegroupnum)				
+Resolution:			$hires - $lores ($outhires - $outlores)		
+R-merge:			$rmergepercent ($rmergeoutpercent)				
+R-meas:				$rmeaspercent ($rmeasoutpercent)				
+R-pim:				$rpimpercent ($rpimoutpercent)				
+Total observations:		$totalobs ($totalobsout)				
+Unique observations:		$unique ($uniqueout)				
+Mean ((I)/sd(I)):		$signal ($signalout)
+Mean half-set correlation:	$halfsetcc ($halfsetccout)				
+Mosaicity (deg):		$mosaicity					
+Completeness:			$completeness ($completenessout)				
+Multiplicity:			$multiplicity ($multiplicityout)				
+Anisotropic delta B:            $aniso_deltab
+Wilson B-factor:		$wilsonb" | tee -a $sumlog
+
+if [ "$anom" = "" ]; then
+	echo -e "\
+Anomalous completeness:		$anomcompleteness ($anomcompletenessout)	
+Anomalous multiplicity:		$anommultiplicity ($anommultiplicityout)
+Mean anomalous difference:	$siganototal ($siganoouter)
+Mean anomalous correlation:	$anomcorrtotal ($anomcorrouter)
+Friedel pairs:			$anompairstotal ($anompairsouter)" | tee -a $sumlog
+fi
+
+exit
